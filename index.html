@@ -294,6 +294,16 @@ html,body{height:100%;overflow:hidden;font-family:'Nunito',sans-serif;background
 .voice-dot:nth-child(2){animation-delay:.2s}
 .voice-dot:nth-child(3){animation-delay:.4s}
 @keyframes vDot{0%,100%{opacity:.3;transform:scale(.8)}50%{opacity:1;transform:scale(1.2)}}
+
+/* ── API Key setup ── */
+.apikey-overlay{position:fixed;inset:0;background:rgba(23,20,15,.95);z-index:300;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:32px;opacity:0;pointer-events:none;transition:opacity .22s}
+.apikey-overlay.open{opacity:1;pointer-events:all}
+.apikey-box{width:100%;max-width:400px;background:var(--bg2);border-radius:24px;padding:28px;border:1px solid var(--border2)}
+.apikey-icon{font-size:36px;text-align:center;margin-bottom:14px}
+.apikey-title{font-family:'Playfair Display',serif;font-size:20px;font-weight:600;color:var(--text);text-align:center;margin-bottom:8px}
+.apikey-sub{font-size:13px;color:var(--muted);text-align:center;line-height:1.6;margin-bottom:20px}
+.apikey-sub a{color:var(--accent);text-decoration:none}
+.apikey-actions{display:flex;flex-direction:column;gap:8px;margin-top:16px}
 </style>
 </head>
 <body>
@@ -373,6 +383,27 @@ html,body{height:100%;overflow:hidden;font-family:'Nunito',sans-serif;background
       <div class="voice-dot"></div><div class="voice-dot"></div><div class="voice-dot"></div>
     </div>
     <button class="voice-cancel" onclick="stopVoice()">Cancelar</button>
+  </div>
+
+  <!-- API Key overlay -->
+  <div class="apikey-overlay" id="apikeyOverlay">
+    <div class="apikey-box">
+      <div class="apikey-icon">🔑</div>
+      <div class="apikey-title">Chave de API</div>
+      <div class="apikey-sub">
+        Para usar o reconhecimento por voz, você precisa de uma chave da Anthropic.<br><br>
+        Crie gratuitamente em <a href="https://console.anthropic.com" target="_blank">console.anthropic.com</a> → API Keys → Create Key.<br><br>
+        A chave fica salva só no seu dispositivo.
+      </div>
+      <div class="fg">
+        <label class="fl">Sua chave (começa com sk-ant-...)</label>
+        <input type="password" class="fi" id="apikeyInput" placeholder="sk-ant-api03-..." autocomplete="off">
+      </div>
+      <div class="apikey-actions">
+        <button class="btn btn-primary" onclick="saveApiKey()">Salvar e continuar</button>
+        <button class="btn btn-ghost" onclick="closeApiKey()">Cancelar</button>
+      </div>
+    </div>
   </div>
 
   <div class="bottom-nav">
@@ -1072,12 +1103,32 @@ document.addEventListener('keydown',e=>{
 let recognition=null;
 let voiceActive=false;
 
+function getApiKey(){ return localStorage.getItem('agenda_apikey')||''; }
+function saveApiKey(){
+  const val=document.getElementById('apikeyInput').value.trim();
+  if(!val.startsWith('sk-ant-')){ 
+    document.getElementById('apikeyInput').style.borderColor='var(--red)';
+    return;
+  }
+  localStorage.setItem('agenda_apikey', val);
+  closeApiKey();
+  startVoice();
+}
+function closeApiKey(){ document.getElementById('apikeyOverlay').classList.remove('open'); }
+function openApiKey(){
+  document.getElementById('apikeyInput').value=getApiKey();
+  document.getElementById('apikeyInput').style.borderColor='';
+  document.getElementById('apikeyOverlay').classList.add('open');
+}
+
 function startVoice(){
   const SpeechRec=window.SpeechRecognition||window.webkitSpeechRecognition;
   if(!SpeechRec){
-    alert('Reconhecimento de voz não suportado neste navegador. Use o Chrome no Android.');
+    alert('Reconhecimento de voz não suportado. Use o Chrome no Android.');
     return;
   }
+  if(!getApiKey()){ openApiKey(); return; }
+
   recognition=new SpeechRec();
   recognition.lang='pt-BR';
   recognition.continuous=false;
@@ -1100,9 +1151,14 @@ function startVoice(){
   };
 
   recognition.onerror=e=>{
-    setVoiceUI('error','Erro ao ouvir. Tente novamente.','');
+    const msgs={
+      'not-allowed':'Permissão de microfone negada. Libere nas configurações do Chrome.',
+      'no-speech':'Nenhuma fala detectada. Tente novamente.',
+      'network':'Erro de rede. Verifique sua conexão.'
+    };
+    setVoiceUI('error', msgs[e.error]||`Erro: ${e.error}`,'');
     document.getElementById('voiceOrb').classList.remove('active');
-    setTimeout(stopVoice, 2000);
+    setTimeout(stopVoice, 3000);
   };
 
   recognition.onend=()=>{
@@ -1125,8 +1181,7 @@ function stopVoice(){
 function setVoiceUI(state, status, transcript){
   document.getElementById('voiceStatus').textContent=status;
   document.getElementById('voiceTranscript').textContent=transcript;
-  const thinking=document.getElementById('voiceThinking');
-  thinking.style.display=state==='thinking'?'flex':'none';
+  document.getElementById('voiceThinking').style.display=state==='thinking'?'flex':'none';
 }
 
 async function parseVoiceWithClaude(text){
@@ -1160,13 +1215,29 @@ Regras:
   try{
     const res=await fetch('https://api.anthropic.com/v1/messages',{
       method:'POST',
-      headers:{'Content-Type':'application/json'},
+      headers:{
+        'Content-Type':'application/json',
+        'x-api-key': getApiKey(),
+        'anthropic-version':'2023-06-01',
+        'anthropic-dangerous-direct-browser-access':'true'
+      },
       body:JSON.stringify({
-        model:'claude-sonnet-4-20250514',
+        model:'claude-haiku-4-5-20251001',
         max_tokens:300,
         messages:[{role:'user',content:prompt}]
       })
     });
+
+    if(!res.ok){
+      const err=await res.json().catch(()=>({}));
+      if(res.status===401){
+        stopVoice();
+        openApiKey();
+        return;
+      }
+      throw new Error(err.error?.message||`HTTP ${res.status}`);
+    }
+
     const data=await res.json();
     const raw=data.content?.[0]?.text||'{}';
     const clean=raw.replace(/```json|```/g,'').trim();
@@ -1174,8 +1245,8 @@ Regras:
     stopVoice();
     fillFormFromVoice(parsed, text);
   } catch(err){
-    setVoiceUI('error','Não consegui interpretar. Tente de novo.','');
-    setTimeout(stopVoice, 2500);
+    setVoiceUI('error',`Erro: ${err.message||'Tente novamente.'}`, '');
+    setTimeout(stopVoice, 3500);
   }
 }
 
